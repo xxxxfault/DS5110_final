@@ -1,0 +1,188 @@
+---
+title: "DS510-Final"
+author: "Team13"
+date: "2023-04-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning=FALSE}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(caret)
+library(pROC)
+```
+
+
+```{r}
+
+
+df <- read_excel("default of credit card clients.xls", skip = 1)
+df <- df %>% rename(default_pay = `default payment next month`)
+```
+
+```{r}
+bins <- c(20,30,40,50,60,70,80)
+names <- c('21-30','31-40','41-50','51-60','61-70','71-80')
+df$age_bin <- cut(x=df$AGE, breaks=bins, labels=names, right=TRUE)
+
+age_cnt <- data.frame(table(df$age_bin))
+age_0 <- data.frame(table(df$age_bin[df$default_pay == 0]))
+age_1 <- data.frame(table(df$age_bin[df$default_pay == 1]))
+
+ggplot() + 
+  geom_bar(data = age_0, aes(x = Var1, y = Freq), stat = "identity", fill = "red", alpha = 0.5) +
+  geom_bar(data = age_1, aes(x = Var1, y = Freq), stat = "identity", fill = "blue", alpha = 0.5) +
+  labs(title = "Number of clients in each age group", x = "Age group", y = "Number of clients") +
+  scale_x_discrete(labels = c("21-30", "31-40", "41-50", "51-60", "61-70", "71-80")) +
+  theme_minimal()
+
+```
+
+```{r}
+library(dplyr)
+rename_df <- df %>%
+   mutate(default_pay = recode(default_pay, "1" = "Yes", "0" ="No"))
+ggplot(rename_df, aes(x=default_pay, y=AGE, fill=default_pay)) +
+   geom_boxplot() +
+   scale_fill_brewer(palette="Set1", direction=-1) +
+   labs(y="Age",
+        x="Default pay",
+        title="Age associated with default pay") +
+   theme_minimal()
+```
+
+
+```{r}
+corrdata <- df %>% select(LIMIT_BAL, SEX, EDUCATION, MARRIAGE, AGE, PAY_0, PAY_2, PAY_3, PAY_4, PAY_5, PAY_6, default_pay)
+corr <- cor(corrdata)
+melted_corr <- melt(corr)
+
+ggplot(melted_corr, aes(x=Var1, y=Var2, fill=value)) +
+geom_tile() +
+ scale_fill_gradient2(low="blue", mid="white", high="red", midpoint=0) +
+   geom_text(aes(label=round(value,2)), color="black", size=3) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle=45, vjust=1, 
+                                    size=12, hjust=1),
+        axis.text.y = element_text(size=12),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.title = element_blank(),
+        legend.text = element_text(size=10),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank())
+```
+
+From this correlated plot, we could see that PAY_5 to PAY_6 have a highest correlation to each other(0.82). We should also consider to remove features with a higher correlation to avoid overfitting. According to above information, I'm going to remove PAY_5 at this point.
+
+
+```{r}
+# drop PAY_5
+df <- df[, !(names(df) %in% c('PAY_5'))]
+
+# encode
+df <- df %>% 
+  mutate_at(vars(EDUCATION, MARRIAGE,default_pay), factor)
+
+```
+
+```{r}
+set.seed(1)
+train <- createDataPartition(df$default_pay, p=0.7, list=FALSE)
+
+table(df$default_pay[train])
+df_train <- df[as.integer(train),]
+df_test <- df[-as.integer(train),]
+
+
+fit <- glm(default_pay ~ ., data=df_train, family=binomial(link="logit"))
+
+summary(fit)
+
+```
+
+```{r}
+prob <- predict(fit, newdata=df_test, type="response")
+
+pred <- ifelse(prob > 0.5, 1, 0)
+
+hist(prob)
+
+```
+
+```{r}
+#  calculate the confusion matrix and statistics
+cm <- confusionMatrix(factor(pred), df_test$default_pay, positive="1")
+cm
+```
+
+```{r}
+test_prob <- predict(fit, newdata = df_test, type = "response")
+test_roc <- roc(df_test$default_pay , test_prob, plot = TRUE, print.auc = TRUE)
+```
+
+
+```{r}
+
+ggplot(df, aes(x = default_pay)) +
+  geom_bar(fill = "steelblue") +
+  scale_fill_brewer(palette="Set1", direction=-1) +
+  labs(title = "Default payment of next month")+
+  scale_x_discrete(labels = c("No default", "default")) +
+  labs(title = "Default payment of next month",
+       x = "Default payment",
+       y = "Number of observations")
+```
+
+Since the number of records for 'default' is significantly lower than 'No default', the original dataset is somehow imbalance. 
+
+
+```{r}
+# address imbalance
+# relevel
+df_train1 <- mutate(df_train, default_pay=relevel(default_pay, 1))
+
+df_test1 <- mutate(df_test, default_pay=relevel(default_pay, 1))
+```
+
+```{r}
+# downsampling
+set.seed(12)
+fit1 <- train(default_pay ~ ., data=df_train1,
+              method="glm", family=binomial(link="logit"),
+              preProcess="medianImpute",
+              trControl=trainControl(method="none",
+                                     sampling="down"),
+              na.action=na.pass)
+
+confusionMatrix(predict(fit1, df_test1, na.action=na.pass),
+                df_test1$default_pay,positive="1")
+
+```
+
+
+```{r}
+# upsampling
+set.seed(12)
+fit1 <- train(default_pay ~ ., data=df_train1,
+              method="glm", family=binomial(link="logit"),
+              preProcess="medianImpute",
+              trControl=trainControl(method="none",
+                                     sampling="up"),
+              na.action=na.pass)
+
+confusionMatrix(predict(fit1, df_test1, na.action=na.pass),
+                df_test1$default_pay,positive="1")
+```
+
+
+
+
+
